@@ -1,0 +1,5 @@
+{
+  "name": "MeeChain Contributor Dashboard",
+  "description": "A dashboard for MeeChain contributors to manage RPC access, badges, and track contributions.",
+  "requestFramePermissions": []
+}
