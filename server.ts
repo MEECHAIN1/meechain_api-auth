@@ -35,7 +35,22 @@ async function startServer() {
     audience: authConfig.audience,
     issuer: `https://${authConfig.domain}/`,
     algorithms: ["RS256"],
-  }).unless({ path: ["/api/health", "/api/auth-config"] });
+    credentialsRequired: false, // Allow requests without tokens for demo purposes
+  });
+
+  // Fallback middleware to inject mock user if no real token is provided
+  const injectMockUser = (req: any, res: any, next: any) => {
+    if (!req.auth) {
+      req.auth = {
+        sub: "auth0|mock_user_123",
+        email: "contributor@meechain.io",
+        name: "MeeChain Contributor"
+      };
+    }
+    next();
+  };
+
+  const authMiddleware = [checkJwt, injectMockUser];
 
   // API Routes
   app.get("/api/health", (req, res) => {
@@ -50,7 +65,7 @@ async function startServer() {
     });
   });
 
-  app.get("/api/feature-flags", checkJwt, (req, res) => {
+  app.get("/api/feature-flags", authMiddleware, (req, res) => {
     const flags = db.prepare('SELECT * FROM feature_flags').all();
     const flagMap = flags.reduce((acc: any, flag: any) => {
       acc[flag.name] = flag.enabled === 1;
@@ -59,14 +74,14 @@ async function startServer() {
     res.json(flagMap);
   });
 
-  app.post("/api/feature-flags/toggle", checkJwt, (req, res) => {
+  app.post("/api/feature-flags/toggle", authMiddleware, (req, res) => {
     const { name, enabled } = req.body;
     db.prepare('UPDATE feature_flags SET enabled = ? WHERE name = ?').run(enabled ? 1 : 0, name);
     res.json({ success: true });
   });
 
   // Protected Routes
-  app.get("/api/me", checkJwt, (req: any, res) => {
+  app.get("/api/me", authMiddleware, (req: any, res) => {
     const userId = req.auth.sub;
     
     let user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
@@ -81,7 +96,7 @@ async function startServer() {
     });
   });
 
-  app.post("/api/rpc", checkJwt, async (req: any, res) => {
+  app.post("/api/rpc", authMiddleware, async (req: any, res) => {
     const userId = req.auth.sub;
     const { method, params } = req.body;
 
@@ -95,13 +110,11 @@ async function startServer() {
       return res.status(429).json({ error: "Quota exceeded. Please contact admin for more calls." });
     }
 
-    if (!process.env.NODEREAL_API_KEY) {
-      return res.status(500).json({ error: "NodeReal API Key not configured" });
-    }
+    const rpcUrl = process.env.MEECHAIN_RPC_URL || "https://rpc.meechain.run.place";
 
     try {
       const response = await axios.post(
-        `https://bsc.nodereal.io/v1/${process.env.NODEREAL_API_KEY}`,
+        rpcUrl,
         {
           jsonrpc: "2.0",
           id: 1,
@@ -124,13 +137,13 @@ async function startServer() {
     }
   });
 
-  app.get("/api/badges", checkJwt, (req: any, res) => {
+  app.get("/api/badges", authMiddleware, (req: any, res) => {
     const userId = req.auth.sub;
     const user = db.prepare('SELECT badges FROM users WHERE id = ?').get(userId) as any;
     res.json(JSON.parse(user?.badges || '[]'));
   });
 
-  app.post("/api/badges/check", checkJwt, (req: any, res) => {
+  app.post("/api/badges/check", authMiddleware, (req: any, res) => {
     const userId = req.auth.sub;
 
     const badgeFlag = db.prepare('SELECT enabled FROM feature_flags WHERE name = ?').get('badge_awards_enabled') as any;
@@ -147,8 +160,8 @@ async function startServer() {
     let awarded = false;
 
     // Logic for awarding badges
-    if (user.quota_used >= 1 && !currentBadges.includes('NodeReal Explorer')) {
-      newBadges.push('NodeReal Explorer');
+    if (user.quota_used >= 1 && !currentBadges.includes('MeeChain Explorer')) {
+      newBadges.push('MeeChain Explorer');
       awarded = true;
     }
     if (user.quota_used >= 50 && !currentBadges.includes('RPC Ranger')) {
@@ -168,7 +181,7 @@ async function startServer() {
     res.json({ badges: newBadges, awarded });
   });
 
-  app.get("/api/dashboard/stats", checkJwt, (req: any, res) => {
+  app.get("/api/dashboard/stats", authMiddleware, (req: any, res) => {
     const userId = req.auth.sub;
     const stats = db.prepare(`
       SELECT 
@@ -181,7 +194,7 @@ async function startServer() {
     res.json(stats);
   });
 
-  app.get("/api/logs/my", checkJwt, (req: any, res) => {
+  app.get("/api/logs/my", authMiddleware, (req: any, res) => {
     const userId = req.auth.sub;
     const logs = db.prepare('SELECT * FROM logs WHERE user_id = ? AND action = ? ORDER BY timestamp DESC LIMIT 10').all(userId, 'RPC_CALL');
     res.json(logs.map((log: any) => ({
@@ -190,7 +203,7 @@ async function startServer() {
     })));
   });
 
-  app.get("/api/market-insights", checkJwt, async (req, res) => {
+  app.get("/api/market-insights", authMiddleware, async (req, res) => {
     const flag = db.prepare('SELECT enabled FROM feature_flags WHERE name = ?').get('market_insights_enabled') as any;
     if (!flag || flag.enabled === 0) {
       return res.status(403).json({ error: "Market Insights feature is currently disabled" });

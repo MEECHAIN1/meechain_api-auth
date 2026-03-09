@@ -13,9 +13,16 @@ import {
   Clock,
   AlertCircle,
   TrendingUp,
-  ExternalLink
+  ExternalLink,
+  CheckCircle2,
+  X,
+  Copy,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import Prism from 'prismjs';
+import 'prismjs/components/prism-json';
+import 'prismjs/themes/prism-tomorrow.css';
 
 // Mock Auth State (Since real Auth0 requires redirect flow which is hard in iframe)
 // In a real app, we'd use @auth0/auth0-react
@@ -31,15 +38,23 @@ export default function App() {
   const [stats, setStats] = useState<any>(null);
   const [badges, setBadges] = useState<string[]>([]);
   const [rpcResult, setRpcResult] = useState<any>(null);
+  const [rpcMethod, setRpcMethod] = useState('eth_blockNumber');
+  const [rpcParams, setRpcParams] = useState('[]');
+  const [isCustomRpc, setIsCustomRpc] = useState(false);
   const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [insights, setInsights] = useState<any>(null);
+  const [isQuotaModalOpen, setIsQuotaModalOpen] = useState(false);
+  const [quotaReason, setQuotaReason] = useState('');
+  const [requestSubmitting, setRequestSubmitting] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [featureFlags, setFeatureFlags] = useState<any>({
     rpc_access_enabled: true,
     badge_awards_enabled: true,
     contributor_list_visible: true,
-    market_insights_enabled: false
+    market_insights_enabled: true
   });
 
   useEffect(() => {
@@ -48,6 +63,12 @@ export default function App() {
     fetchFeatureFlags();
     fetchLogs();
   }, []);
+
+  useEffect(() => {
+    if (rpcResult) {
+      Prism.highlightAll();
+    }
+  }, [rpcResult]);
 
   const fetchLogs = async () => {
     try {
@@ -73,6 +94,9 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setFeatureFlags(data);
+        if (data.market_insights_enabled) {
+          fetchInsights();
+        }
       }
     } catch (err) {
       console.error(err);
@@ -118,45 +142,88 @@ export default function App() {
 
   const fetchStats = async () => {
     try {
-      // In real app: const res = await fetch('/api/dashboard/stats', { headers: { Authorization: `Bearer ${token}` } });
-      // const data = await res.json();
-      // setStats(data);
-      
-      // Simulating real API data for the demo
-      setStats({
-        total_users: 12,
-        total_rpc_calls: 1450,
-        my_calls: 42,
-        quota_limit: 100
-      });
+      const res = await fetch('/api/dashboard/stats');
+      if (res.ok) {
+        const data = await res.json();
+        setStats(data);
+      } else {
+        // Fallback for demo
+        setStats({
+          total_users: 12,
+          total_rpc_calls: 1450,
+          my_calls: 42,
+          quota_limit: 100
+        });
+      }
     } catch (err) {
       console.error(err);
     }
   };
 
   const fetchBadges = async () => {
-    setBadges(['Auth0 Master', 'NodeReal Explorer']);
+    try {
+      const res = await fetch('/api/badges');
+      if (res.ok) {
+        const data = await res.json();
+        setBadges(data);
+      } else {
+        setBadges(['Auth0 Master', 'MeeChain Explorer']);
+      }
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const handleRpcTest = async () => {
     setLoading(true);
     setError(null);
+    setSuccess(null);
+    
+    let parsedParams = [];
     try {
-      // Mocking RPC call
-      setTimeout(() => {
-        setRpcResult({
-          jsonrpc: "2.0",
-          id: 1,
-          result: "0x" + Math.random().toString(16).slice(2, 10)
-        });
-        setLoading(false);
+      parsedParams = JSON.parse(rpcParams);
+      if (!Array.isArray(parsedParams)) {
+        throw new Error("Parameters must be a JSON array (e.g. [\"0x123\", true])");
+      }
+    } catch (err: any) {
+      setError(`Invalid Parameters: ${err.message}`);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: rpcMethod, params: parsedParams })
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        setRpcResult(data);
+        setSuccess(`Successfully executed ${rpcMethod}`);
         fetchLogs();
         fetchStats();
-      }, 1000);
+      } else {
+        const errData = await res.json();
+        setError(errData.error || "RPC Call Failed");
+      }
     } catch (err: any) {
       setError(err.message);
+    } finally {
       setLoading(false);
     }
+  };
+
+  const handleQuotaRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRequestSubmitting(true);
+    // Simulate API call
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    setSuccess("Quota increase request submitted successfully! Our team will review it shortly.");
+    setIsQuotaModalOpen(false);
+    setQuotaReason('');
+    setRequestSubmitting(false);
   };
 
   const renderOverview = () => (
@@ -184,6 +251,40 @@ export default function App() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {featureFlags.market_insights_enabled && (
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 lg:col-span-2">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <TrendingUp className="w-5 h-5 text-emerald-500" />
+                Market Pulse
+              </h3>
+              <button 
+                onClick={() => setActiveTab('insights')}
+                className="text-indigo-600 text-xs font-bold hover:underline flex items-center gap-1"
+              >
+                View Full Report <ChevronRight className="w-3 h-3" />
+              </button>
+            </div>
+            {loading && !insights ? (
+              <div className="animate-pulse flex space-y-4">
+                <div className="flex-1 space-y-2 py-1">
+                  <div className="h-4 bg-slate-100 rounded w-3/4"></div>
+                  <div className="h-4 bg-slate-100 rounded"></div>
+                  <div className="h-4 bg-slate-100 rounded w-5/6"></div>
+                </div>
+              </div>
+            ) : insights ? (
+              <p className="text-sm text-slate-600 line-clamp-3 leading-relaxed">
+                {insights.text}
+              </p>
+            ) : (
+              <p className="text-sm text-slate-400 italic">
+                Market insights are being generated. Click "View Full Report" to see the latest trends.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
           <div className="flex items-center justify-between mb-6">
             <h3 className="text-lg font-semibold flex items-center gap-2">
@@ -288,60 +389,373 @@ export default function App() {
 
   const renderRpc = () => (
     <div className="space-y-6">
-      {!featureFlags.rpc_access_enabled && (
-        <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl flex items-center gap-3 text-amber-700">
-          <AlertCircle className="w-5 h-5" />
-          <p className="text-sm font-medium">RPC Proxy is currently disabled via feature flag.</p>
-        </div>
-      )}
-      <div className={`bg-white p-6 rounded-2xl shadow-sm border border-slate-100 ${!featureFlags.rpc_access_enabled ? 'opacity-50 pointer-events-none' : ''}`}>
-        <h3 className="text-lg font-semibold flex items-center gap-2 mb-6">
-          <Terminal className="w-5 h-5 text-indigo-500" />
-          RPC Proxy Tester
-        </h3>
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Method</label>
-            <select className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none">
-              <option>eth_blockNumber</option>
-              <option>eth_gasPrice</option>
-              <option>eth_getBalance</option>
-            </select>
+      {/* Quota Feedback Section */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
+                <Activity className="w-5 h-5 text-emerald-500" />
+              </div>
+              <div>
+                <h4 className="text-sm font-semibold text-slate-900">Personal RPC Quota</h4>
+                <p className="text-xs text-slate-500">Usage for the current period</p>
+              </div>
+            </div>
+            <div className="text-right">
+              <span className="text-xl font-bold text-slate-900">{stats?.my_calls || 0}</span>
+              <span className="text-slate-400 text-sm"> / {stats?.quota_limit || 100}</span>
+            </div>
+          </div>
+          <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-2">
+            <div 
+              className={`h-full transition-all duration-500 ${
+                (stats?.my_calls / (stats?.quota_limit || 100)) > 0.9 ? 'bg-red-500' : 
+                (stats?.my_calls / (stats?.quota_limit || 100)) > 0.7 ? 'bg-amber-500' : 'bg-emerald-500'
+              }`}
+              style={{ width: `${Math.min((stats?.my_calls / (stats?.quota_limit || 100)) * 100, 100)}%` }}
+            />
+          </div>
+          <div className="flex justify-between items-center">
+            <p className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">
+              {Math.round((stats?.my_calls / (stats?.quota_limit || 100)) * 100)}% Consumed
+            </p>
+            {stats?.my_calls >= stats?.quota_limit && (
+              <span className="text-[10px] text-red-600 font-bold flex items-center gap-1">
+                <AlertCircle className="w-3 h-3" /> LIMIT REACHED
+              </span>
+            )}
           </div>
           <button 
-            onClick={handleRpcTest}
-            disabled={loading}
-            className="w-full py-3 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            onClick={() => setIsQuotaModalOpen(true)}
+            className="mt-6 w-full py-2 border border-indigo-100 text-indigo-600 rounded-xl text-xs font-bold hover:bg-indigo-50 transition-colors flex items-center justify-center gap-2"
           >
-            {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Zap className="w-4 h-4" />}
-            Execute RPC Call
+            <Zap className="w-3 h-3" /> Request Quota Increase
           </button>
+        </div>
+
+        <div className="bg-slate-900 p-6 rounded-2xl shadow-md text-white border border-slate-800">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 bg-indigo-500/20 rounded-xl flex items-center justify-center border border-indigo-500/30">
+              <ShieldCheck className="w-5 h-5 text-indigo-400" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold">Network Configuration</h4>
+              <p className="text-xs text-slate-400">MeeChain Mainnet</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div className="p-3 bg-white/5 rounded-xl border border-white/10">
+              <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">Chain ID</p>
+              <p className="text-sm font-mono text-indigo-300">13390 (0x344e)</p>
+            </div>
+            <div className="p-3 bg-white/5 rounded-xl border border-white/10">
+              <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">Currency</p>
+              <p className="text-sm font-mono text-emerald-400">MEC</p>
+            </div>
+          </div>
+          <div className="p-3 bg-white/5 rounded-xl border border-white/10">
+            <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">RPC Endpoint</p>
+            <p className="text-xs font-mono text-slate-300 truncate">https://rpc.meechain.run.place</p>
+          </div>
         </div>
       </div>
 
-      {rpcResult && (
-        <motion.div 
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-slate-900 p-6 rounded-2xl shadow-lg"
-        >
-          <div className="flex items-center justify-between mb-4">
-            <h4 className="text-slate-400 text-sm font-mono">Response</h4>
-            <span className="text-emerald-400 text-xs font-mono">200 OK</span>
-          </div>
-          <pre className="text-indigo-300 font-mono text-sm overflow-x-auto">
-            {JSON.stringify(rpcResult, null, 2)}
-          </pre>
-        </motion.div>
-      )}
-
-      {error && (
-        <div className="p-4 bg-red-50 border border-red-100 rounded-xl flex items-center gap-3 text-red-700">
+      {!featureFlags.rpc_access_enabled && (
+        <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl flex items-center gap-3 text-amber-700">
           <AlertCircle className="w-5 h-5" />
-          <p className="text-sm">{error}</p>
+          <p className="text-sm font-medium">RPC Proxy is currently disabled for maintenance.</p>
         </div>
       )}
+
+      <div className={`grid grid-cols-1 lg:grid-cols-3 gap-6 ${!featureFlags.rpc_access_enabled ? 'opacity-50 pointer-events-none' : ''}`}>
+        <div className="lg:col-span-1 space-y-6">
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <Terminal className="w-5 h-5 text-indigo-500" />
+                RPC Tester
+              </h3>
+              <div className="flex bg-slate-100 p-1 rounded-lg">
+                <button 
+                  onClick={() => setIsCustomRpc(false)}
+                  className={`px-3 py-1 text-[10px] font-bold uppercase rounded-md transition-all ${!isCustomRpc ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  Presets
+                </button>
+                <button 
+                  onClick={() => setIsCustomRpc(true)}
+                  className={`px-3 py-1 text-[10px] font-bold uppercase rounded-md transition-all ${isCustomRpc ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  Custom
+                </button>
+              </div>
+            </div>
+            <div className="space-y-4">
+              <AnimatePresence>
+                {error && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="p-4 bg-red-50 border border-red-100 rounded-xl flex items-center gap-3 text-red-700"
+                  >
+                    <AlertCircle className="w-5 h-5 shrink-0" />
+                    <p className="text-sm font-medium">{error}</p>
+                  </motion.div>
+                )}
+                {success && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="p-4 bg-emerald-50 border border-emerald-100 rounded-xl flex items-center gap-3 text-emerald-700"
+                  >
+                    <CheckCircle2 className="w-5 h-5 shrink-0" />
+                    <p className="text-sm font-medium">{success}</p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {isCustomRpc ? (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">Method Name</label>
+                    <input 
+                      type="text"
+                      value={rpcMethod}
+                      onChange={(e) => setRpcMethod(e.target.value)}
+                      placeholder="e.g. eth_getBalance"
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">Parameters (JSON Array)</label>
+                    <textarea 
+                      value={rpcParams}
+                      onChange={(e) => setRpcParams(e.target.value)}
+                      placeholder='e.g. ["0x...", "latest"]'
+                      rows={3}
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-mono resize-none"
+                    />
+                  </div>
+                </>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Select Preset</label>
+                  <select 
+                    value={rpcMethod}
+                    onChange={(e) => {
+                      setRpcMethod(e.target.value);
+                      setRpcParams('[]');
+                    }}
+                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
+                  >
+                    <option value="eth_blockNumber">eth_blockNumber - Get current block</option>
+                    <option value="eth_gasPrice">eth_gasPrice - Current network gas</option>
+                    <option value="eth_getBalance">eth_getBalance - Check account balance</option>
+                  </select>
+                </div>
+              )}
+              <p className="mt-2 text-[10px] text-slate-400 italic">
+                Each execution consumes 1 unit from your personal quota.
+              </p>
+              <button 
+                onClick={handleRpcTest}
+                disabled={loading || (stats?.my_calls >= stats?.quota_limit)}
+                className="w-full py-3 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Zap className="w-4 h-4" />}
+                {stats?.my_calls >= stats?.quota_limit ? 'Quota Exceeded' : 'Execute RPC Call'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="lg:col-span-2 space-y-6">
+          {rpcResult ? (
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="bg-slate-900 p-6 rounded-2xl shadow-lg h-full flex flex-col"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                  <h4 className="text-slate-400 text-sm font-mono">Live Response</h4>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => {
+                      navigator.clipboard.writeText(JSON.stringify(rpcResult, null, 2));
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className="flex items-center gap-1.5 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[10px] font-mono transition-colors border border-slate-700"
+                  >
+                    {copied ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span className="text-emerald-400">Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        <span>Copy JSON</span>
+                      </>
+                    )}
+                  </button>
+                  <span className="text-emerald-400 text-xs font-mono px-2 py-1 bg-emerald-400/10 rounded">200 OK</span>
+                </div>
+              </div>
+              <div className="flex-1 overflow-auto max-h-[300px] custom-scrollbar">
+                <pre className="language-json !bg-transparent !p-0 !m-0">
+                  <code className="language-json">
+                    {JSON.stringify(rpcResult, null, 2)}
+                  </code>
+                </pre>
+              </div>
+              <div className="mt-4 pt-4 border-t border-slate-800 flex justify-between items-center">
+                <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">MeeChain Mainnet (Chain ID: 13390)</p>
+                <button 
+                  onClick={() => setRpcResult(null)}
+                  className="text-slate-400 hover:text-white text-xs transition-colors"
+                >
+                  Clear Output
+                </button>
+              </div>
+            </motion.div>
+          ) : (
+            <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl h-full flex flex-col items-center justify-center p-12 text-center">
+              <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-4">
+                <Terminal className="w-8 h-8 text-slate-300" />
+              </div>
+              <h4 className="text-slate-900 font-semibold mb-2">No Active Response</h4>
+              <p className="text-slate-500 text-sm max-w-xs">
+                Select an RPC method and click execute to see the live network response data here.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="text-lg font-semibold flex items-center gap-2">
+            <Clock className="w-5 h-5 text-slate-500" />
+            RPC Usage History
+          </h3>
+          <button 
+            onClick={fetchLogs}
+            className="text-xs text-indigo-600 font-semibold hover:underline"
+          >
+            Refresh Logs
+          </button>
+        </div>
+        <div className="overflow-hidden rounded-xl border border-slate-100">
+          <table className="w-full text-left">
+            <thead className="bg-slate-50 border-bottom border-slate-100">
+              <tr>
+                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Method</th>
+                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Timestamp</th>
+                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {logs.length > 0 ? logs.map((log) => (
+                <tr key={log.id} className="hover:bg-slate-50 transition-colors">
+                  <td className="px-6 py-4">
+                    <code className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                      {log.details.method}
+                    </code>
+                  </td>
+                  <td className="px-6 py-4 text-xs text-slate-500">
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-3 h-3" />
+                      {new Date(log.timestamp).toLocaleString()}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-[10px] font-bold rounded uppercase">
+                      Success
+                    </span>
+                  </td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={3} className="px-6 py-8 text-center text-slate-400 text-sm italic">
+                    No recent RPC activity found.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
+  );
+
+  const renderQuotaModal = () => (
+    <AnimatePresence>
+      {isQuotaModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.9, y: 20 }}
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+          >
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                <Zap className="w-5 h-5 text-amber-500" />
+                Request Quota Increase
+              </h3>
+              <button 
+                onClick={() => setIsQuotaModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            <form onSubmit={handleQuotaRequest} className="p-6 space-y-4">
+              <div className="p-4 bg-indigo-50 rounded-xl border border-indigo-100">
+                <p className="text-sm text-indigo-700 leading-relaxed">
+                  Current Quota: <strong>{stats?.quota_limit || 100} calls/period</strong>. 
+                  Requests are typically reviewed within 24 hours.
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">Reason for Increase</label>
+                <textarea 
+                  required
+                  value={quotaReason}
+                  onChange={(e) => setQuotaReason(e.target.value)}
+                  placeholder="Tell us why you need more RPC calls (e.g., developing a new dApp, running a node monitor...)"
+                  rows={4}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm resize-none"
+                />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button 
+                  type="button"
+                  onClick={() => setIsQuotaModalOpen(false)}
+                  className="flex-1 py-3 border border-slate-200 text-slate-600 rounded-xl font-medium hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit"
+                  disabled={requestSubmitting}
+                  className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {requestSubmitting ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : 'Submit Request'}
+                </button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
   );
 
   return (
@@ -505,7 +919,7 @@ export default function App() {
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       <ContributorRow name="Alice" badges={['Auth0 Master', 'JWT Guardian']} calls={120} status="Active" />
-                      <ContributorRow name="Bob" badges={['NodeReal Explorer']} calls={45} status="Active" />
+                      <ContributorRow name="Bob" badges={['MeeChain Explorer']} calls={45} status="Active" />
                       <ContributorRow name="Carol" badges={['Onboarding Hero']} calls={12} status="Idle" />
                     </tbody>
                   </table>
@@ -520,60 +934,82 @@ export default function App() {
             )}
             {activeTab === 'settings' && (
               <div className="space-y-6">
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-lg font-semibold flex items-center gap-2 mb-6">
-                    <Settings className="w-5 h-5 text-slate-500" />
-                    Feature Flags (Admin)
-                  </h3>
-                  <div className="space-y-4">
-                    <FeatureToggle 
-                      label="RPC Access" 
-                      description="Enable/disable the RPC Proxy tester"
-                      enabled={featureFlags.rpc_access_enabled}
-                      onToggle={() => toggleFeatureFlag('rpc_access_enabled')}
-                    />
-                    <FeatureToggle 
-                      label="Badge Awards" 
-                      description="Enable/disable automatic badge checking and awarding"
-                      enabled={featureFlags.badge_awards_enabled}
-                      onToggle={() => toggleFeatureFlag('badge_awards_enabled')}
-                    />
-                    <FeatureToggle 
-                      label="Contributor List" 
-                      description="Show/hide the global contributor leaderboard"
-                      enabled={featureFlags.contributor_list_visible}
-                      onToggle={() => toggleFeatureFlag('contributor_list_visible')}
-                    />
-                    <FeatureToggle 
-                      label="Market Insights" 
-                      description="Enable AI-powered network trends and insights (A/B Test)"
-                      enabled={featureFlags.market_insights_enabled}
-                      onToggle={() => toggleFeatureFlag('market_insights_enabled')}
-                    />
+                <div className="bg-indigo-50 p-6 rounded-2xl border border-indigo-100">
+                  <div className="flex items-center gap-3 mb-2">
+                    <ShieldCheck className="w-6 h-6 text-indigo-600" />
+                    <h3 className="text-lg font-bold text-indigo-900">Admin Control Center</h3>
                   </div>
+                  <p className="text-sm text-indigo-700">
+                    Manage network-wide features, contributor access, and system quotas. Changes take effect immediately for all users.
+                  </p>
                 </div>
 
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-lg font-semibold flex items-center gap-2 mb-6">
-                    <Zap className="w-5 h-5 text-amber-500" />
-                    Quota Management (Admin)
-                  </h3>
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-100">
-                      <div>
-                        <h4 className="text-sm font-semibold text-slate-900">Global Default Quota</h4>
-                        <p className="text-xs text-slate-500">Default RPC calls allowed per contributor</p>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                    <h3 className="text-lg font-semibold flex items-center gap-2 mb-6">
+                      <Settings className="w-5 h-5 text-slate-500" />
+                      Feature Rollouts
+                    </h3>
+                    <div className="space-y-4">
+                      <FeatureToggle 
+                        label="RPC Access" 
+                        description="Enable/disable the RPC Proxy tester globally"
+                        enabled={featureFlags.rpc_access_enabled}
+                        onToggle={() => toggleFeatureFlag('rpc_access_enabled')}
+                      />
+                      <FeatureToggle 
+                        label="Badge Awards" 
+                        description="Enable/disable automatic badge checking and awarding"
+                        enabled={featureFlags.badge_awards_enabled}
+                        onToggle={() => toggleFeatureFlag('badge_awards_enabled')}
+                      />
+                      <FeatureToggle 
+                        label="Contributor List" 
+                        description="Show/hide the global contributor leaderboard"
+                        enabled={featureFlags.contributor_list_visible}
+                        onToggle={() => toggleFeatureFlag('contributor_list_visible')}
+                      />
+                      <FeatureToggle 
+                        label="Market Insights" 
+                        description="Enable AI-powered network trends (A/B Test)"
+                        enabled={featureFlags.market_insights_enabled}
+                        onToggle={() => toggleFeatureFlag('market_insights_enabled')}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                    <h3 className="text-lg font-semibold flex items-center gap-2 mb-6">
+                      <Zap className="w-5 h-5 text-amber-500" />
+                      Quota Management
+                    </h3>
+                    <div className="space-y-4">
+                      <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                        <h4 className="text-sm font-semibold text-slate-900 mb-1">Global Default Quota</h4>
+                        <p className="text-xs text-slate-500 mb-4">Initial RPC calls allowed for new contributors</p>
+                        <div className="flex items-center gap-3">
+                          <div className="relative flex-1">
+                            <input 
+                              type="number" 
+                              value={stats?.quota_limit || 100} 
+                              onChange={(e) => setStats({...stats, quota_limit: parseInt(e.target.value)})}
+                              className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-semibold"
+                            />
+                            <Activity className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                          </div>
+                          <button className="px-4 py-2 bg-indigo-600 text-white text-sm font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-sm">
+                            Update
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <input 
-                          type="number" 
-                          value={stats?.quota_limit || 100} 
-                          onChange={(e) => setStats({...stats, quota_limit: parseInt(e.target.value)})}
-                          className="w-20 p-2 bg-white border border-slate-200 rounded-lg text-sm text-center"
-                        />
-                        <button className="px-3 py-2 bg-indigo-600 text-white text-xs font-medium rounded-lg hover:bg-indigo-700">
-                          Update
-                        </button>
+
+                      <div className="p-4 border border-slate-100 rounded-xl">
+                        <h4 className="text-sm font-semibold text-slate-900 mb-1">Quota Reset Policy</h4>
+                        <p className="text-xs text-slate-500 mb-3">Quotas are currently set to persist indefinitely.</p>
+                        <div className="flex gap-2">
+                          <button className="flex-1 py-2 bg-slate-100 text-slate-600 text-[10px] font-bold rounded uppercase hover:bg-slate-200">Reset All Users</button>
+                          <button className="flex-1 py-2 bg-slate-100 text-slate-600 text-[10px] font-bold rounded uppercase hover:bg-slate-200">Set Monthly Reset</button>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -583,6 +1019,7 @@ export default function App() {
           </motion.div>
         </AnimatePresence>
       </main>
+      {renderQuotaModal()}
     </div>
   );
 }

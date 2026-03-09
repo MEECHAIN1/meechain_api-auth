@@ -31,7 +31,7 @@ db.exec(`
   INSERT OR IGNORE INTO feature_flags (name, enabled) VALUES ('rpc_access_enabled', 1);
   INSERT OR IGNORE INTO feature_flags (name, enabled) VALUES ('badge_awards_enabled', 1);
   INSERT OR IGNORE INTO feature_flags (name, enabled) VALUES ('contributor_list_visible', 1);
-  INSERT OR IGNORE INTO feature_flags (name, enabled) VALUES ('market_insights_enabled', 0);
+  INSERT OR IGNORE INTO feature_flags (name, enabled) VALUES ('market_insights_enabled', 1);
 `);
 
 export default db;
