@@ -1,0 +1,21 @@
+# Caddyfile for MeeChain RPC Routing
+# This file uses environment variables to route traffic to the correct backend.
+
+rpc.meechain.live {
+  # Route to Ritual node if USE_ENV is set to "ritual"
+  @ritual expression {env.USE_ENV} == "ritual"
+  reverse_proxy @ritual ritual-node:8545
+
+  # Route to Hardhat/Anvil node if USE_ENV is set to "hardhat"
+  @hardhat expression {env.USE_ENV} == "hardhat"
+  reverse_proxy @hardhat hardhat-node:8545
+
+  # Default fallback (if USE_ENV is not set or invalid)
+  @default not expression {env.USE_ENV} == "ritual" or {env.USE_ENV} == "hardhat"
+  reverse_proxy @default hardhat-node:8545
+
+  # Logging for debugging
+  log {
+    output file /var/log/caddy/access.log
+  }
+}

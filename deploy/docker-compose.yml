@@ -1,0 +1,45 @@
+version: "3.8"
+services:
+  # Local Development Node (Hardhat/Anvil)
+  hardhat-node:
+    image: ghcr.io/foundry-rs/foundry:latest
+    command: anvil --host 0.0.0.0 --port 8545
+    ports:
+      - "8545:8545"
+    networks:
+      - meechain-net
+
+  # Production Ritual Node
+  ritual-node:
+    image: ritual/node:latest
+    command: >
+      --http --http.addr 0.0.0.0 --http.port 8545
+      --http.api eth,net,web3
+    ports:
+      - "8546:8545" # Map to different host port if needed
+    networks:
+      - meechain-net
+
+  # Reverse Proxy (Caddy)
+  caddy:
+    image: caddy:latest
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - USE_ENV=${USE_ENV:-hardhat}
+    networks:
+      - meechain-net
+
+networks:
+  meechain-net:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

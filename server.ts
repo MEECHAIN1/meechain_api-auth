@@ -10,8 +10,6 @@ import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -52,6 +50,11 @@ async function startServer() {
 
   const authMiddleware = [checkJwt, injectMockUser];
 
+  app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+    next();
+  });
+
   // API Routes
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
@@ -62,6 +65,13 @@ async function startServer() {
       domain: authConfig.domain,
       clientId: "6hyf98TCLxD8IV7Cf2mlaRZDjrD3qUHB",
       audience: authConfig.audience
+    });
+  });
+
+  app.get("/api/rpc-config", (req, res) => {
+    res.json({
+      rpcUrl: process.env.MEECHAIN_RPC_URL || process.env.RITUAL_RPC_URL || "https://rpc.meechain.run.place",
+      env: process.env.USE_ENV || "hardhat"
     });
   });
 
@@ -112,7 +122,9 @@ async function startServer() {
 
     const rpcUrl = process.env.MEECHAIN_RPC_URL || "https://rpc.meechain.run.place";
 
+    const startTime = Date.now();
     try {
+      console.log(`Forwarding RPC request: ${method}`, params);
       const response = await axios.post(
         rpcUrl,
         {
@@ -120,19 +132,37 @@ async function startServer() {
           id: 1,
           method,
           params
-        }
+        },
+        { timeout: 10000 }
       );
+      const duration = Date.now() - startTime;
+      console.log(`RPC response received for ${method} in ${duration}ms`);
 
       // Log activity and update quota
       db.prepare('UPDATE users SET quota_used = quota_used + 1, last_active = CURRENT_TIMESTAMP WHERE id = ?').run(userId);
       db.prepare('INSERT INTO logs (user_id, action, details) VALUES (?, ?, ?)').run(
         userId, 
         'RPC_CALL', 
-        JSON.stringify({ method })
+        JSON.stringify({ 
+          method, 
+          duration,
+          status: response.data.error ? 'error' : 'success'
+        })
       );
 
       res.json(response.data);
     } catch (error: any) {
+      const duration = Date.now() - startTime;
+      db.prepare('INSERT INTO logs (user_id, action, details) VALUES (?, ?, ?)').run(
+        userId, 
+        'RPC_CALL', 
+        JSON.stringify({ 
+          method, 
+          duration,
+          status: 'failed',
+          error: error.message
+        })
+      );
       res.status(500).json({ error: error.message });
     }
   });
@@ -194,7 +224,7 @@ async function startServer() {
     res.json(stats);
   });
 
-  app.get("/api/logs/my", authMiddleware, (req: any, res) => {
+  app.get(["/api/logs", "/api/logs/my"], authMiddleware, (req: any, res) => {
     const userId = req.auth.sub;
     const logs = db.prepare('SELECT * FROM logs WHERE user_id = ? AND action = ? ORDER BY timestamp DESC LIMIT 10').all(userId, 'RPC_CALL');
     res.json(logs.map((log: any) => ({
@@ -203,27 +233,17 @@ async function startServer() {
     })));
   });
 
-  app.get("/api/market-insights", authMiddleware, async (req, res) => {
-    const flag = db.prepare('SELECT enabled FROM feature_flags WHERE name = ?').get('market_insights_enabled') as any;
-    if (!flag || flag.enabled === 0) {
-      return res.status(403).json({ error: "Market Insights feature is currently disabled" });
-    }
+  // 404 handler for API routes
+  app.use("/api", (req, res) => {
+    res.status(404).json({ error: "API route not found" });
+  });
 
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: "Provide a brief summary of the latest trends in the BSC (BNB Smart Chain) ecosystem and MeeChain related news if any.",
-        config: {
-          tools: [{ googleSearch: {} }],
-        },
-      });
-
-      res.json({ 
-        text: response.text,
-        sources: response.candidates?.[0]?.groundingMetadata?.groundingChunks || []
-      });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+  // Error handling for JWT
+  app.use((err: any, req: any, res: any, next: any) => {
+    if (err.name === "UnauthorizedError") {
+      res.status(401).json({ error: "Invalid or missing token" });
+    } else {
+      next(err);
     }
   });
 

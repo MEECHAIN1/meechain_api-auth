@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Component } from 'react';
 import { 
   LayoutDashboard, 
   Users, 
@@ -17,12 +17,61 @@ import {
   CheckCircle2,
   X,
   Copy,
-  Check
+  Check,
+  Download,
+  BrainCircuit,
+  User as UserIcon,
+  LogIn,
+  Save,
+  Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Prism from 'prismjs';
 import 'prismjs/components/prism-json';
 import 'prismjs/themes/prism-tomorrow.css';
+import { GoogleGenAI } from "@google/genai";
+import { auth, db, googleProvider, OperationType, handleFirestoreError } from './firebase';
+import { signInWithPopup, onAuthStateChanged, User as FirebaseUser, signOut } from 'firebase/auth';
+import { doc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore';
+
+// Error Boundary Component
+class ErrorBoundary extends Component<any, any> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      let errorMessage = "Something went wrong.";
+      try {
+        const errorData = JSON.parse(this.state.error.message);
+        errorMessage = `Firestore Error: ${errorData.error} during ${errorData.operationType} on ${errorData.path}`;
+      } catch (e) {
+        errorMessage = this.state.error?.message || String(this.state.error);
+      }
+
+      return (
+        <div className="p-8 bg-red-50 border border-red-200 rounded-2xl text-center">
+          <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+          <h2 className="text-xl font-bold text-red-900 mb-2">Application Error</h2>
+          <p className="text-red-700 mb-6 max-w-md mx-auto">{errorMessage}</p>
+          <button 
+            onClick={() => window.location.reload()}
+            className="px-6 py-2 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-colors"
+          >
+            Reload Application
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Mock Auth State (Since real Auth0 requires redirect flow which is hard in iframe)
 // In a real app, we'd use @auth0/auth0-react
@@ -33,7 +82,26 @@ const MOCK_USER = {
   picture: "https://api.dicebear.com/7.x/avataaars/svg?seed=MeeChain"
 };
 
+async function safeFetchJson(url: string, options?: RequestInit) {
+  const res = await fetch(url, options);
+  const contentType = res.headers.get("content-type");
+  if (contentType && contentType.includes("application/json")) {
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || `Error ${res.status}: ${res.statusText}`);
+    }
+    return data;
+  } else {
+    const text = await res.text();
+    console.error(`Non-JSON response from ${url}:`, text.substring(0, 100));
+    throw new Error(`Server Error ${res.status}: ${res.statusText}`);
+  }
+}
+
 export default function App() {
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [profile, setProfile] = useState<any>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [activeTab, setActiveTab] = useState('overview');
   const [stats, setStats] = useState<any>(null);
   const [badges, setBadges] = useState<string[]>([]);
@@ -56,6 +124,68 @@ export default function App() {
     contributor_list_visible: true,
     market_insights_enabled: true
   });
+  const [highlightedJson, setHighlightedJson] = useState('');
+
+  const [rpcView, setRpcView] = useState<'response' | 'request' | 'history'>('response');
+  const [presetSearch, setPresetSearch] = useState('');
+
+  const [editUsername, setEditUsername] = useState('');
+  const [editAvatar, setEditAvatar] = useState('');
+  const [rpcConfig, setRpcConfig] = useState<any>(null);
+
+  useEffect(() => {
+    const fetchRpcConfig = async () => {
+      try {
+        const response = await fetch('/api/rpc-config');
+        if (response.ok) {
+          const data = await response.json();
+          setRpcConfig(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch RPC config:', err);
+      }
+    };
+    fetchRpcConfig();
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setProfile(null);
+      return;
+    }
+
+    const unsubscribe = onSnapshot(doc(db, 'users', user.uid), (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        setProfile(data);
+        setEditUsername(data.username || '');
+        setEditAvatar(data.avatarUrl || '');
+      } else {
+        // Initialize profile if it doesn't exist
+        const initialProfile = {
+          username: user.displayName || 'New Contributor',
+          avatarUrl: user.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.uid}`,
+          email: user.email,
+          updatedAt: serverTimestamp()
+        };
+        setDoc(doc(db, 'users', user.uid), initialProfile).catch(err => {
+          handleFirestoreError(err, OperationType.CREATE, `users/${user.uid}`);
+        });
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
 
   useEffect(() => {
     fetchStats();
@@ -64,42 +194,50 @@ export default function App() {
     fetchLogs();
   }, []);
 
+  const clearLogs = async () => {
+    // In a real app, this would call an API
+    setLogs([]);
+    setSuccess("History cleared locally");
+  };
+
   useEffect(() => {
     if (rpcResult) {
-      Prism.highlightAll();
+      try {
+        const json = JSON.stringify(rpcResult, null, 2);
+        const html = Prism.highlight(json, Prism.languages.json, 'json');
+        setHighlightedJson(html);
+      } catch (err) {
+        console.error("Prism highlighting error:", err);
+        setHighlightedJson(JSON.stringify(rpcResult, null, 2));
+      }
+    } else {
+      setHighlightedJson('');
     }
   }, [rpcResult]);
 
   const fetchLogs = async () => {
     try {
-      const res = await fetch('/api/logs/my');
-      if (res.ok) {
-        const data = await res.json();
-        setLogs(data);
-      } else {
-        // Fallback for demo if backend fails or no auth
-        setLogs([
-          { id: 1, details: { method: 'eth_blockNumber' }, timestamp: new Date().toISOString() },
-          { id: 2, details: { method: 'eth_gasPrice' }, timestamp: new Date(Date.now() - 3600000).toISOString() },
-        ]);
-      }
+      const data = await safeFetchJson('/api/logs');
+      setLogs(data);
     } catch (err) {
-      console.error(err);
+      console.error("fetchLogs error:", err);
+      // Fallback for demo if backend fails or no auth
+      setLogs([
+        { id: 1, details: { method: 'eth_blockNumber' }, timestamp: new Date().toISOString() },
+        { id: 2, details: { method: 'eth_gasPrice' }, timestamp: new Date(Date.now() - 3600000).toISOString() },
+      ]);
     }
   };
 
   const fetchFeatureFlags = async () => {
     try {
-      const res = await fetch('/api/feature-flags');
-      if (res.ok) {
-        const data = await res.json();
-        setFeatureFlags(data);
-        if (data.market_insights_enabled) {
-          fetchInsights();
-        }
+      const data = await safeFetchJson('/api/feature-flags');
+      setFeatureFlags(data);
+      if (data.market_insights_enabled) {
+        fetchInsights();
       }
     } catch (err) {
-      console.error(err);
+      console.error("fetchFeatureFlags error:", err);
     }
   };
 
@@ -107,28 +245,41 @@ export default function App() {
     const newValue = !featureFlags[name];
     setFeatureFlags({ ...featureFlags, [name]: newValue });
     try {
-      await fetch('/api/feature-flags/toggle', { 
+      await safeFetchJson('/api/feature-flags/toggle', { 
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, enabled: newValue })
       });
     } catch (err) {
-      console.error(err);
+      console.error("toggleFeatureFlag error:", err);
     }
   };
 
   const fetchInsights = async () => {
     setLoading(true);
+    setError(null);
     try {
-      const res = await fetch('/api/market-insights');
-      if (res.ok) {
-        const data = await res.json();
-        setInsights(data);
-      } else {
-        setError("Failed to fetch insights. Feature might be disabled.");
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("Gemini API Key is not configured in the environment.");
       }
+
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: "Provide a brief summary of the latest trends in the BSC (BNB Smart Chain) ecosystem and MeeChain related news if any.",
+        config: {
+          tools: [{ googleSearch: {} }],
+        },
+      });
+
+      setInsights({ 
+        text: response.text,
+        sources: response.candidates?.[0]?.groundingMetadata?.groundingChunks || []
+      });
     } catch (err: any) {
-      setError(err.message);
+      console.error("fetchInsights error:", err);
+      setError(`Gemini Error: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -142,37 +293,65 @@ export default function App() {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('/api/dashboard/stats');
-      if (res.ok) {
-        const data = await res.json();
-        setStats(data);
-      } else {
-        // Fallback for demo
-        setStats({
-          total_users: 12,
-          total_rpc_calls: 1450,
-          my_calls: 42,
-          quota_limit: 100
-        });
-      }
+      const data = await safeFetchJson('/api/dashboard/stats');
+      setStats(data);
     } catch (err) {
-      console.error(err);
+      console.error("fetchStats error:", err);
+      // Fallback for demo
+      setStats({
+        total_users: 12,
+        total_rpc_calls: 1450,
+        my_calls: 42,
+        quota_limit: 100
+      });
     }
   };
 
   const fetchBadges = async () => {
     try {
-      const res = await fetch('/api/badges');
-      if (res.ok) {
-        const data = await res.json();
-        setBadges(data);
-      } else {
-        setBadges(['Auth0 Master', 'MeeChain Explorer']);
-      }
+      const data = await safeFetchJson('/api/badges');
+      setBadges(data);
     } catch (err) {
-      console.error(err);
+      console.error("fetchBadges error:", err);
+      setBadges(['Auth0 Master', 'MeeChain Explorer']);
     }
   };
+
+  const RPC_PRESETS = [
+    { method: 'eth_blockNumber', params: '[]', description: 'Get current block height' },
+    { method: 'eth_gasPrice', params: '[]', description: 'Current network gas price' },
+    { method: 'eth_getBalance', params: '["0x0000000000000000000000000000000000000000", "latest"]', description: 'Check account balance' },
+    { method: 'eth_chainId', params: '[]', description: 'Get network chain ID' },
+    { method: 'eth_getTransactionCount', params: '["0x0000000000000000000000000000000000000000", "latest"]', description: 'Get nonce for account' },
+    { method: 'eth_getBlockByNumber', params: '["latest", true]', description: 'Get full block details' },
+    { method: 'eth_getCode', params: '["0x0000000000000000000000000000000000000000", "latest"]', description: 'Get contract bytecode' },
+    { method: 'eth_getTransactionByHash', params: '["0x0000000000000000000000000000000000000000000000000000000000000000"]', description: 'Get transaction details by hash' },
+    { method: 'eth_getTransactionReceipt', params: '["0x0000000000000000000000000000000000000000000000000000000000000000"]', description: 'Get transaction receipt' },
+    { method: 'eth_syncing', params: '[]', description: 'Check if node is syncing' },
+    { method: 'eth_mining', params: '[]', description: 'Check if node is mining' },
+    { method: 'eth_hashrate', params: '[]', description: 'Get current mining hashrate' },
+    { method: 'eth_accounts', params: '[]', description: 'Get list of accounts' },
+    { method: 'eth_protocolVersion', params: '[]', description: 'Get protocol version' },
+    { method: 'net_version', params: '[]', description: 'Get network ID' },
+    { method: 'net_listening', params: '[]', description: 'Check if node is listening' },
+    { method: 'net_peerCount', params: '[]', description: 'Get number of peers' },
+    { method: 'eth_getProof', params: '["0x0000000000000000000000000000000000000000", ["0x0000000000000000000000000000000000000000000000000000000000000000"], "latest"]', description: 'Get proof for a specific account/storage' },
+    { method: 'web3_clientVersion', params: '[]', description: 'Get node client version' },
+    { method: 'web3_sha3', params: '["0x68656c6c6f20776f726c64"]', description: 'Keccak-256 hash' },
+  ];
+
+  const filteredPresets = RPC_PRESETS.filter(p => 
+    p.method.toLowerCase().includes(presetSearch.toLowerCase()) || 
+    p.description.toLowerCase().includes(presetSearch.toLowerCase())
+  );
+
+  const QUICK_PARAMS = [
+    { label: 'Zero Address', value: '0x0000000000000000000000000000000000000000' },
+    { label: 'Latest Block', value: 'latest' },
+    { label: 'Earliest Block', value: 'earliest' },
+    { label: 'True', value: 'true' },
+    { label: 'False', value: 'false' },
+  ];
 
   const handleRpcTest = async () => {
     setLoading(true);
@@ -201,12 +380,25 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setRpcResult(data);
-        setSuccess(`Successfully executed ${rpcMethod}`);
+        
+        if (data.error) {
+          setError(`RPC Error: ${data.error.message || JSON.stringify(data.error)}`);
+        } else {
+          setSuccess(`Successfully executed ${rpcMethod}`);
+        }
+        
         fetchLogs();
         fetchStats();
       } else {
-        const errData = await res.json();
-        setError(errData.error || "RPC Call Failed");
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const errData = await res.json();
+          setError(errData.error || "RPC Call Failed");
+        } else {
+          const text = await res.text();
+          console.error("Non-JSON error response:", text);
+          setError(`Server Error: ${res.status} ${res.statusText}`);
+        }
       }
     } catch (err: any) {
       setError(err.message);
@@ -225,6 +417,159 @@ export default function App() {
     setQuotaReason('');
     setRequestSubmitting(false);
   };
+
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    setLoading(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      await setDoc(doc(db, 'users', user.uid), {
+        username: editUsername,
+        avatarUrl: editAvatar,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      setSuccess("Profile updated successfully!");
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: any) {
+      setError(`Sign in failed: ${err.message}`);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setActiveTab('overview');
+    } catch (err: any) {
+      setError(`Sign out failed: ${err.message}`);
+    }
+  };
+
+  const renderProfile = () => (
+    <div className="max-w-2xl mx-auto space-y-6">
+      <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-100">
+        <div className="flex items-center gap-6 mb-8">
+          <div className="relative group">
+            <img 
+              src={profile?.avatarUrl || user?.photoURL || "https://api.dicebear.com/7.x/avataaars/svg?seed=fallback"} 
+              alt="Avatar" 
+              className="w-24 h-24 rounded-2xl object-cover bg-slate-100 border-4 border-white shadow-md" 
+            />
+            <div className="absolute inset-0 bg-black/40 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+              <Camera className="text-white w-6 h-6" />
+            </div>
+          </div>
+          <div>
+            <h3 className="text-2xl font-bold text-slate-900">{profile?.username || user?.displayName}</h3>
+            <p className="text-slate-500">{user?.email}</p>
+            <div className="mt-2 flex gap-2">
+              <span className="px-2 py-1 bg-indigo-50 text-indigo-600 text-[10px] font-bold rounded uppercase tracking-wider">Contributor</span>
+              <span className="px-2 py-1 bg-emerald-50 text-emerald-600 text-[10px] font-bold rounded uppercase tracking-wider">Verified</span>
+            </div>
+          </div>
+        </div>
+
+        <form onSubmit={handleUpdateProfile} className="space-y-4">
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-2">Username</label>
+            <input 
+              type="text" 
+              value={editUsername}
+              onChange={(e) => setEditUsername(e.target.value)}
+              className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
+              placeholder="Enter your username"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-2">Avatar URL</label>
+            <input 
+              type="url" 
+              value={editAvatar}
+              onChange={(e) => setEditAvatar(e.target.value)}
+              className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
+              placeholder="https://example.com/avatar.png"
+            />
+            <p className="mt-1 text-[10px] text-slate-400 italic">Pro tip: Use Dicebear or Unsplash URLs for best results.</p>
+          </div>
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Save className="w-4 h-4" />}
+            Save Changes
+          </button>
+        </form>
+      </div>
+
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+        <h4 className="text-sm font-bold text-slate-900 mb-4 uppercase tracking-widest">Account Security</h4>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
+            <div className="flex items-center gap-3">
+              <ShieldCheck className="w-5 h-5 text-emerald-500" />
+              <div>
+                <p className="text-sm font-semibold text-slate-900">Two-Factor Authentication</p>
+                <p className="text-xs text-slate-500">Managed via Google Account</p>
+              </div>
+            </div>
+            <span className="text-[10px] font-bold text-emerald-600 bg-emerald-100 px-2 py-1 rounded">ENABLED</span>
+          </div>
+          <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
+            <div className="flex items-center gap-3">
+              <Clock className="w-5 h-5 text-blue-500" />
+              <div>
+                <p className="text-sm font-semibold text-slate-900">Last Password Change</p>
+                <p className="text-xs text-slate-500">3 months ago</p>
+              </div>
+            </div>
+            <button className="text-xs font-bold text-indigo-600 hover:underline">Update</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+        <h4 className="text-sm font-bold text-slate-900 mb-4 uppercase tracking-widest">Network Configuration</h4>
+        <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+          <div className="flex items-center gap-3 mb-3">
+            <Terminal className="w-5 h-5 text-indigo-600" />
+            <p className="text-sm font-semibold text-slate-900">RPC Proxy Endpoint</p>
+          </div>
+          {rpcConfig?.rpcUrl ? (
+            <div className="space-y-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <code className="text-[10px] bg-white px-3 py-2 rounded-lg border border-slate-200 text-indigo-600 font-mono break-all flex-1">
+                  {rpcConfig.rpcUrl}
+                </code>
+                <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wider self-start sm:self-center ${
+                  rpcConfig.env === 'ritual' ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'
+                }`}>
+                  {rpcConfig.env || 'unknown'}
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-400 italic">
+                This endpoint is currently active for all network interactions and RPC Proxy calls.
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm text-slate-500 italic">No RPC endpoint configured</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 
   const renderOverview = () => (
     <div className="space-y-6">
@@ -368,8 +713,12 @@ export default function App() {
                     {new Date(log.timestamp).toLocaleString()}
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-[10px] font-bold rounded uppercase">
-                      Success
+                    <span className={`px-2 py-1 text-[10px] font-bold rounded uppercase ${
+                      log.details.status === 'success' ? 'bg-emerald-100 text-emerald-700' :
+                      log.details.status === 'error' ? 'bg-amber-100 text-amber-700' :
+                      'bg-red-100 text-red-700'
+                    }`}>
+                      {log.details.status || 'Success'}
                     </span>
                   </td>
                 </tr>
@@ -468,8 +817,9 @@ export default function App() {
         </div>
       )}
 
-      <div className={`grid grid-cols-1 lg:grid-cols-3 gap-6 ${!featureFlags.rpc_access_enabled ? 'opacity-50 pointer-events-none' : ''}`}>
-        <div className="lg:col-span-1 space-y-6">
+      <div className={`grid grid-cols-1 lg:grid-cols-12 gap-6 ${!featureFlags.rpc_access_enabled ? 'opacity-50 pointer-events-none' : ''}`}>
+        {/* Left Column: Controls */}
+        <div className="lg:col-span-4 space-y-6">
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold flex items-center gap-2">
@@ -492,9 +842,10 @@ export default function App() {
               </div>
             </div>
             <div className="space-y-4">
-              <AnimatePresence>
+              <AnimatePresence mode="wait">
                 {error && (
                   <motion.div 
+                    key="error-msg"
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
@@ -506,6 +857,7 @@ export default function App() {
                 )}
                 {success && (
                   <motion.div 
+                    key="success-msg"
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
@@ -530,7 +882,29 @@ export default function App() {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-2">Parameters (JSON Array)</label>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="block text-sm font-medium text-slate-700">Parameters (JSON Array)</label>
+                      <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
+                        {QUICK_PARAMS.map(p => (
+                          <button 
+                            key={p.label}
+                            onClick={() => {
+                              try {
+                                const current = JSON.parse(rpcParams);
+                                if (Array.isArray(current)) {
+                                  setRpcParams(JSON.stringify([...current, p.value === 'true' ? true : p.value === 'false' ? false : p.value]));
+                                }
+                              } catch (e) {
+                                setRpcParams(`["${p.value}"]`);
+                              }
+                            }}
+                            className="text-[10px] whitespace-nowrap px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded border border-slate-200 transition-colors"
+                          >
+                            +{p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                     <textarea 
                       value={rpcParams}
                       onChange={(e) => setRpcParams(e.target.value)}
@@ -541,20 +915,54 @@ export default function App() {
                   </div>
                 </>
               ) : (
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">Select Preset</label>
-                  <select 
-                    value={rpcMethod}
-                    onChange={(e) => {
-                      setRpcMethod(e.target.value);
-                      setRpcParams('[]');
-                    }}
-                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
-                  >
-                    <option value="eth_blockNumber">eth_blockNumber - Get current block</option>
-                    <option value="eth_gasPrice">eth_gasPrice - Current network gas</option>
-                    <option value="eth_getBalance">eth_getBalance - Check account balance</option>
-                  </select>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">Search & Select Preset</label>
+                    <div className="relative mb-2">
+                      <input 
+                        type="text"
+                        value={presetSearch}
+                        onChange={(e) => setPresetSearch(e.target.value)}
+                        placeholder="Filter methods..."
+                        className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
+                      />
+                      <Terminal className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-400" />
+                    </div>
+                    <select 
+                      value={rpcMethod}
+                      onChange={(e) => {
+                        const method = e.target.value;
+                        const preset = RPC_PRESETS.find(p => p.method === method);
+                        setRpcMethod(method);
+                        if (preset) {
+                          setRpcParams(preset.params);
+                        }
+                      }}
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
+                    >
+                      {filteredPresets.map(p => (
+                        <option key={p.method} value={p.method}>{p.method}</option>
+                      ))}
+                      {filteredPresets.length === 0 && <option disabled>No matches found</option>}
+                    </select>
+                  </div>
+                  {RPC_PRESETS.find(p => p.method === rpcMethod) && (
+                    <div className="bg-indigo-50/50 p-3 rounded-xl border border-indigo-100">
+                      <p className="text-[11px] text-indigo-700 font-medium mb-1">Description</p>
+                      <p className="text-[11px] text-slate-600 italic leading-relaxed">
+                        {RPC_PRESETS.find(p => p.method === rpcMethod)?.description}
+                      </p>
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">Parameters</label>
+                    <textarea 
+                      value={rpcParams}
+                      onChange={(e) => setRpcParams(e.target.value)}
+                      rows={2}
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-mono resize-none"
+                    />
+                  </div>
                 </div>
               )}
               <p className="mt-2 text-[10px] text-slate-400 italic">
@@ -572,124 +980,223 @@ export default function App() {
           </div>
         </div>
 
-        <div className="lg:col-span-2 space-y-6">
-          {rpcResult ? (
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="bg-slate-900 p-6 rounded-2xl shadow-lg h-full flex flex-col"
-            >
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                  <h4 className="text-slate-400 text-sm font-mono">Live Response</h4>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => {
-                      navigator.clipboard.writeText(JSON.stringify(rpcResult, null, 2));
-                      setCopied(true);
-                      setTimeout(() => setCopied(false), 2000);
-                    }}
-                    className="flex items-center gap-1.5 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[10px] font-mono transition-colors border border-slate-700"
-                  >
-                    {copied ? (
-                      <>
-                        <Check className="w-3 h-3 text-emerald-400" />
-                        <span className="text-emerald-400">Copied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3 h-3" />
-                        <span>Copy JSON</span>
-                      </>
-                    )}
-                  </button>
-                  <span className="text-emerald-400 text-xs font-mono px-2 py-1 bg-emerald-400/10 rounded">200 OK</span>
-                </div>
-              </div>
-              <div className="flex-1 overflow-auto max-h-[300px] custom-scrollbar">
-                <pre className="language-json !bg-transparent !p-0 !m-0">
-                  <code className="language-json">
-                    {JSON.stringify(rpcResult, null, 2)}
-                  </code>
-                </pre>
-              </div>
-              <div className="mt-4 pt-4 border-t border-slate-800 flex justify-between items-center">
-                <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">MeeChain Mainnet (Chain ID: 13390)</p>
+        {/* Right Column: Output & History */}
+        <div className="lg:col-span-8 space-y-6">
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden flex flex-col h-[600px]">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50/50">
+              <div className="flex gap-4">
                 <button 
-                  onClick={() => setRpcResult(null)}
-                  className="text-slate-400 hover:text-white text-xs transition-colors"
+                  onClick={() => setRpcView('response')}
+                  className={`text-sm font-bold uppercase tracking-wider pb-1 border-b-2 transition-all ${rpcView === 'response' ? 'text-indigo-600 border-indigo-600' : 'text-slate-400 border-transparent hover:text-slate-600'}`}
                 >
-                  Clear Output
+                  Response
+                </button>
+                <button 
+                  onClick={() => setRpcView('request')}
+                  className={`text-sm font-bold uppercase tracking-wider pb-1 border-b-2 transition-all ${rpcView === 'request' ? 'text-indigo-600 border-indigo-600' : 'text-slate-400 border-transparent hover:text-slate-600'}`}
+                >
+                  Request
+                </button>
+                <button 
+                  onClick={() => setRpcView('history')}
+                  className={`text-sm font-bold uppercase tracking-wider pb-1 border-b-2 transition-all ${rpcView === 'history' ? 'text-indigo-600 border-indigo-600' : 'text-slate-400 border-transparent hover:text-slate-600'}`}
+                >
+                  History
                 </button>
               </div>
-            </motion.div>
-          ) : (
-            <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl h-full flex flex-col items-center justify-center p-12 text-center">
-              <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-4">
-                <Terminal className="w-8 h-8 text-slate-300" />
+              <div className="flex items-center gap-2">
+                {rpcView === 'response' && rpcResult && (
+                  <button 
+                    onClick={() => setRpcResult(null)}
+                    className="text-[10px] font-bold text-slate-400 hover:text-red-500 uppercase flex items-center gap-1"
+                  >
+                    <X className="w-3 h-3" /> Clear
+                  </button>
+                )}
+                {rpcView === 'history' && logs.length > 0 && (
+                  <button 
+                    onClick={clearLogs}
+                    className="text-[10px] font-bold text-slate-400 hover:text-red-500 uppercase flex items-center gap-1"
+                  >
+                    <X className="w-3 h-3" /> Clear History
+                  </button>
+                )}
               </div>
-              <h4 className="text-slate-900 font-semibold mb-2">No Active Response</h4>
-              <p className="text-slate-500 text-sm max-w-xs">
-                Select an RPC method and click execute to see the live network response data here.
-              </p>
             </div>
-          )}
-        </div>
-      </div>
 
-      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-        <div className="flex items-center justify-between mb-6">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            <Clock className="w-5 h-5 text-slate-500" />
-            RPC Usage History
-          </h3>
-          <button 
-            onClick={fetchLogs}
-            className="text-xs text-indigo-600 font-semibold hover:underline"
-          >
-            Refresh Logs
-          </button>
-        </div>
-        <div className="overflow-hidden rounded-xl border border-slate-100">
-          <table className="w-full text-left">
-            <thead className="bg-slate-50 border-bottom border-slate-100">
-              <tr>
-                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Method</th>
-                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Timestamp</th>
-                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {logs.length > 0 ? logs.map((log) => (
-                <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-6 py-4">
-                    <code className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
-                      {log.details.method}
-                    </code>
-                  </td>
-                  <td className="px-6 py-4 text-xs text-slate-500">
-                    <div className="flex items-center gap-2">
-                      <Clock className="w-3 h-3" />
-                      {new Date(log.timestamp).toLocaleString()}
+            <div className="flex-1 overflow-hidden relative">
+              <AnimatePresence mode="wait">
+                {rpcView === 'response' ? (
+                  <motion.div 
+                    key="view-response"
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
+                    className="h-full flex flex-col"
+                  >
+                    {rpcResult ? (
+                      <div className="flex-1 flex flex-col p-6 bg-slate-900">
+                        <div className="flex items-center justify-between mb-4">
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                            <h4 className="text-slate-400 text-sm font-mono">Live Response</h4>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => {
+                                const blob = new Blob([JSON.stringify(rpcResult, null, 2)], { type: 'application/json' });
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url;
+                                a.download = `rpc_response_${rpcMethod}_${Date.now()}.json`;
+                                a.click();
+                                URL.revokeObjectURL(url);
+                              }}
+                              className="flex items-center gap-1.5 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[10px] font-mono transition-colors border border-slate-700"
+                            >
+                              <Download className="w-3 h-3" />
+                              <span>Download</span>
+                            </button>
+                            <button 
+                              onClick={() => {
+                                navigator.clipboard.writeText(JSON.stringify(rpcResult, null, 2));
+                                setCopied(true);
+                                setTimeout(() => setCopied(false), 2000);
+                              }}
+                              className="flex items-center gap-1.5 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[10px] font-mono transition-colors border border-slate-700"
+                            >
+                              {copied ? (
+                                <>
+                                  <Check className="w-3 h-3 text-emerald-400" />
+                                  <span className="text-emerald-400">Copied!</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  <span>Copy JSON</span>
+                                </>
+                              )}
+                            </button>
+                            <span className="text-emerald-400 text-xs font-mono px-2 py-1 bg-emerald-400/10 rounded">200 OK</span>
+                          </div>
+                        </div>
+                        <div className="flex-1 overflow-auto custom-scrollbar">
+                          <pre className="language-json !bg-transparent !p-0 !m-0">
+                            <code 
+                              className="language-json"
+                              dangerouslySetInnerHTML={{ __html: highlightedJson }}
+                            />
+                          </pre>
+                        </div>
+                        <div className="mt-4 pt-4 border-t border-slate-800 flex justify-between items-center">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">MeeChain Mainnet (Chain ID: 13390)</p>
+                          <p className="text-[10px] text-slate-500 font-mono">Executed at {new Date().toLocaleTimeString()}</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center p-12 text-center bg-slate-50">
+                        <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-4">
+                          <Terminal className="w-8 h-8 text-slate-300" />
+                        </div>
+                        <h4 className="text-slate-900 font-semibold mb-2">No Active Response</h4>
+                        <p className="text-slate-500 text-sm max-w-xs">
+                          Select an RPC method and click execute to see the live network response data here.
+                        </p>
+                      </div>
+                    )}
+                  </motion.div>
+                ) : rpcView === 'request' ? (
+                  <motion.div 
+                    key="view-request"
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
+                    className="h-full flex flex-col p-6 bg-slate-900"
+                  >
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2">
+                        <div className="w-2 h-2 bg-indigo-500 rounded-full" />
+                        <h4 className="text-slate-400 text-sm font-mono">Request Payload</h4>
+                      </div>
                     </div>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-[10px] font-bold rounded uppercase">
-                      Success
-                    </span>
-                  </td>
-                </tr>
-              )) : (
-                <tr>
-                  <td colSpan={3} className="px-6 py-8 text-center text-slate-400 text-sm italic">
-                    No recent RPC activity found.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                    <div className="flex-1 overflow-auto custom-scrollbar">
+                      <pre className="text-indigo-300 font-mono text-xs leading-relaxed">
+                        {JSON.stringify({
+                          jsonrpc: "2.0",
+                          id: 1,
+                          method: rpcMethod,
+                          params: JSON.parse(rpcParams || '[]')
+                        }, null, 2)}
+                      </pre>
+                    </div>
+                    <div className="mt-4 pt-4 border-t border-slate-800">
+                      <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">POST /api/rpc</p>
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div 
+                    key="view-history"
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
+                    className="h-full overflow-auto p-6"
+                  >
+                    {logs.length > 0 ? (
+                      <div className="space-y-3">
+                        {logs.map((log) => (
+                          <div 
+                            key={log.id} 
+                            className="p-4 bg-slate-50 border border-slate-100 rounded-xl hover:border-indigo-200 transition-all group cursor-pointer"
+                            onClick={() => {
+                              setRpcMethod(log.details.method);
+                              setRpcView('response');
+                            }}
+                          >
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2">
+                                <code className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                                  {log.details.method}
+                                </code>
+                                {log.details.status && (
+                                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                                    log.details.status === 'success' ? 'bg-emerald-100 text-emerald-700' : 
+                                    log.details.status === 'error' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'
+                                  }`}>
+                                    {log.details.status}
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                {new Date(log.timestamp).toLocaleString()}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-3">
+                                <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">MeeChain Mainnet</p>
+                                {log.details.duration && (
+                                  <span className="text-[10px] text-slate-400 font-mono">{log.details.duration}ms</span>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-emerald-600 font-bold flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <Zap className="w-3 h-3" /> RE-RUN
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center p-12 text-center">
+                        <Clock className="w-12 h-12 text-slate-200 mb-4" />
+                        <h4 className="text-slate-900 font-semibold mb-2">History is Empty</h4>
+                        <p className="text-slate-500 text-sm">Your recent RPC calls will appear here.</p>
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -698,12 +1205,18 @@ export default function App() {
   const renderQuotaModal = () => (
     <AnimatePresence>
       {isQuotaModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+        >
           <motion.div 
             initial={{ opacity: 0, scale: 0.9, y: 20 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.9, y: 20 }}
             className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
           >
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
               <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
@@ -753,7 +1266,7 @@ export default function App() {
               </div>
             </form>
           </motion.div>
-        </div>
+        </motion.div>
       )}
     </AnimatePresence>
   );
@@ -778,6 +1291,12 @@ export default function App() {
               label="Overview"
             />
             <NavItem 
+              active={activeTab === 'profile'} 
+              onClick={() => setActiveTab('profile')}
+              icon={<UserIcon className="w-5 h-5" />}
+              label="My Profile"
+            />
+            <NavItem 
               active={activeTab === 'rpc'} 
               onClick={() => setActiveTab('rpc')}
               icon={<Terminal className="w-5 h-5" />}
@@ -787,7 +1306,7 @@ export default function App() {
               <NavItem 
                 active={activeTab === 'insights'} 
                 onClick={() => setActiveTab('insights')}
-                icon={<TrendingUp className="w-5 h-5" />}
+                icon={<BrainCircuit className="w-5 h-5" />}
                 label="Market Insights"
               />
             )}
@@ -807,17 +1326,32 @@ export default function App() {
         </div>
 
         <div className="mt-auto p-6 border-t border-slate-100">
-          <div className="flex items-center gap-3 mb-4">
-            <img src={MOCK_USER.picture} alt="Avatar" className="w-10 h-10 rounded-full bg-slate-100" />
-            <div className="overflow-hidden">
-              <p className="text-sm font-semibold text-slate-900 truncate">{MOCK_USER.name}</p>
-              <p className="text-xs text-slate-500 truncate">{MOCK_USER.email}</p>
-            </div>
-          </div>
-          <button className="w-full flex items-center justify-center gap-2 py-2 text-sm font-medium text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors">
-            <LogOut className="w-4 h-4" />
-            Sign Out
-          </button>
+          {user ? (
+            <>
+              <div className="flex items-center gap-3 mb-4">
+                <img src={profile?.avatarUrl || user.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.uid}`} alt="Avatar" className="w-10 h-10 rounded-full bg-slate-100 object-cover" />
+                <div className="overflow-hidden">
+                  <p className="text-sm font-semibold text-slate-900 truncate">{profile?.username || user.displayName || 'Contributor'}</p>
+                  <p className="text-xs text-slate-500 truncate">{user.email}</p>
+                </div>
+              </div>
+              <button 
+                onClick={handleSignOut}
+                className="w-full flex items-center justify-center gap-2 py-2 text-sm font-medium text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+                Sign Out
+              </button>
+            </>
+          ) : (
+            <button 
+              onClick={handleSignIn}
+              className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
+            >
+              <LogIn className="w-4 h-4" />
+              Sign In with Google
+            </button>
+          )}
         </div>
       </aside>
 
@@ -844,9 +1378,11 @@ export default function App() {
             exit={{ opacity: 0, x: -20 }}
             transition={{ duration: 0.2 }}
           >
-            {activeTab === 'overview' && renderOverview()}
-            {activeTab === 'rpc' && renderRpc()}
-            {activeTab === 'insights' && (
+            <ErrorBoundary>
+              {activeTab === 'overview' && renderOverview()}
+              {activeTab === 'profile' && renderProfile()}
+              {activeTab === 'rpc' && renderRpc()}
+              {activeTab === 'insights' && (
               <div className="space-y-6">
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
                   <div className="flex items-center justify-between mb-6">
@@ -1016,6 +1552,7 @@ export default function App() {
                 </div>
               </div>
             )}
+            </ErrorBoundary>
           </motion.div>
         </AnimatePresence>
       </main>
